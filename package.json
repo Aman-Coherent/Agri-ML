@@ -1,0 +1,9 @@
+{
+  "name": "product-generator",
+  "private": true,
+  "scripts": {
+    "predev": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/predev.ps1",
+    "dev": "node scripts/dev.mjs",
+    "postinstall": "npm install --prefix frontend"
+  }
+}
