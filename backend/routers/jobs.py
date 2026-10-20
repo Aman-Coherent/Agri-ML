@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.auth.jwt_verify import AuthenticatedUser, get_current_user
 from backend.core.job_engine import request_cancel, request_pause, request_resume
+from backend.core.user_keys import ensure_required_keys
 from backend.db.database import get_session
 from backend.db.models import CompanyInput, Job, Project
 from backend.dependencies import arq_dependency, redis_dependency
@@ -62,6 +63,7 @@ async def create_and_start_job(
     companies = count_result.scalars().all()
     if not companies:
         raise HTTPException(400, "Upload a CSV of companies before starting a job")
+    await ensure_required_keys(session, user.id, body.mode or project.mode)
 
     concurrency = max(1, min(body.concurrency, 200))
     already_done = sum(1 for c in companies if c.status == "done")
@@ -145,6 +147,7 @@ async def resume_job(
     job = await _get_owned_job(session, job_id, user.id)
     if job.status not in ("PAUSED", "FAILED"):
         raise HTTPException(400, f"Cannot resume a job in status {job.status}")
+    await ensure_required_keys(session, user.id, job.mode)
 
     await request_resume(redis, job_id)
     job.status = "QUEUED"
@@ -196,6 +199,7 @@ async def retry_failed_companies(
             f"Cannot retry failed companies while the job is {old_job.status}. "
             "Wait for it to finish, or use Pause/Resume/Stop first.",
         )
+    await ensure_required_keys(session, user.id, old_job.mode)
 
     all_companies = list(
         (

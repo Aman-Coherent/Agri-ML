@@ -16,6 +16,7 @@ router = APIRouter(prefix="/api/companies", tags=["companies"])
 class CompanyOut(BaseModel):
     id: str
     row_index: int
+    native_id: str | None
     company_name: str
     location: str | None
     url: str | None
@@ -23,10 +24,11 @@ class CompanyOut(BaseModel):
     url_read_source: str | None
     url_read_success: bool | None
     url_error: str | None
-    supply_chain_primary: str | None
+    description: str | None
+    is_agriculture: bool | None
+    has_new_roles: bool | None
     display_label: str | None
     classification_confidence: float | None
-    is_multi: bool | None
     products_count: int
     processing_time_ms: int | None
     error_message: str | None

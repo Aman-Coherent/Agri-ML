@@ -125,6 +125,9 @@ class CompanyInput(Base):
     project_id: Mapped[str] = mapped_column(sa.ForeignKey("projects.id", ondelete="CASCADE"))
     row_index: Mapped[int] = mapped_column(sa.Integer)
 
+    # The user's own native/lead id from their CSV - carried into every export
+    # so results can be joined back to their source records.
+    native_id: Mapped[str | None] = mapped_column(sa.String(255), nullable=True)
     company_name: Mapped[str] = mapped_column(sa.String(255))
     location: Mapped[str | None] = mapped_column(sa.String(255), nullable=True)
     url: Mapped[str | None] = mapped_column(sa.String(500), nullable=True)
@@ -134,17 +137,18 @@ class CompanyInput(Base):
 
     # URL read tracking
     url_read_source: Mapped[str | None] = mapped_column(sa.String(32), nullable=True)
-    # jina_reader | compound_beta | name_location | none
+    # direct_fetch | jina_reader | compound_beta | web_search | name_location | none
     url_read_success: Mapped[bool | None] = mapped_column(sa.Boolean, nullable=True)
     url_markdown_tokens: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
-    url_error: Mapped[str | None] = mapped_column(sa.String(64), nullable=True)
+    url_error: Mapped[str | None] = mapped_column(sa.String(200), nullable=True)
 
-    # Classification result
-    supply_chain_primary: Mapped[str | None] = mapped_column(sa.String(32), nullable=True)
-    supply_chain_all: Mapped[str | None] = mapped_column(sa.Text, nullable=True)  # JSON list
-    display_label: Mapped[str | None] = mapped_column(sa.String(120), nullable=True)
+    # Agriculture analysis result (see core/models.AgriProfile)
+    description: Mapped[str | None] = mapped_column(sa.Text, nullable=True)
+    is_agriculture: Mapped[bool | None] = mapped_column(sa.Boolean, nullable=True)
+    roles_json: Mapped[str | None] = mapped_column(sa.Text, nullable=True)  # JSON list of ResolvedRole
+    has_new_roles: Mapped[bool | None] = mapped_column(sa.Boolean, nullable=True)
+    display_label: Mapped[str | None] = mapped_column(sa.String(500), nullable=True)
     classification_confidence: Mapped[float | None] = mapped_column(sa.Float, nullable=True)
-    is_multi: Mapped[bool | None] = mapped_column(sa.Boolean, nullable=True)
 
     products_count: Mapped[int] = mapped_column(sa.Integer, default=0)
     processing_time_ms: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)

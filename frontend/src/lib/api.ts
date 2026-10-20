@@ -72,29 +72,57 @@ export interface Job {
 
 export interface UploadCsvResult {
   total_rows: number;
+  with_website: number;
+  without_website: number;
   preview: Record<string, string>[];
   errors: { row: number; message: string }[];
-  detected_columns: { company_name: string | null; url: string | null; location: string | null };
+  detected_columns: {
+    native_id: string | null;
+    company_name: string | null;
+    url: string | null;
+    location: string | null;
+  };
 }
 
 export interface Company {
   id: string;
   row_index: number;
+  native_id: string | null;
   company_name: string;
   location: string | null;
   url: string | null;
   status: "pending" | "running" | "done" | "failed";
-  url_read_source: "jina_reader" | "compound_beta" | "name_location" | "none" | null;
+  url_read_source:
+    | "direct_fetch"
+    | "jina_reader"
+    | "compound_beta"
+    | "web_search"
+    | "name_location"
+    | "none"
+    | null;
   url_read_success: boolean | null;
   url_error: string | null;
-  supply_chain_primary: string | null;
+  description: string | null;
+  is_agriculture: boolean | null;
+  has_new_roles: boolean | null;
   display_label: string | null;
   classification_confidence: number | null;
-  is_multi: boolean | null;
   products_count: number;
   processing_time_ms: number | null;
   error_message: string | null;
 }
+
+export interface CompanyProduct {
+  name: string;
+  category: string; // the role this product/service belongs to
+  kind: "product" | "service";
+  source: "website" | "web_search" | "inferred";
+  entity: string;
+  business_types: string;
+  is_new_role: boolean;
+}
+
+export type ExportKind = "entities" | "new_roles" | "products";
 
 export interface CompanyPage {
   companies: Company[];
@@ -213,22 +241,27 @@ export const api = {
   },
 
   getCompanyProducts: (token: string, companyId: string) =>
-    request<{ company_id: string; products: Record<string, string>[] }>(
+    request<{ company_id: string; products: CompanyProduct[] }>(
       `/api/companies/${companyId}/products`,
       token
     ),
 
   // ─────────────────────────── Export ───────────────────────────
 
-  exportUrl: (projectId: string, fmt: "csv" | "json", token: string, jobId?: string) => {
-    const search = new URLSearchParams({ fmt, token });
+  exportUrl: (projectId: string, fmt: "csv" | "json", token: string, kind: ExportKind = "products", jobId?: string) => {
+    const search = new URLSearchParams({ fmt, kind, token });
     if (jobId) search.set("job_id", jobId);
     return `${BACKEND_URL}/api/export/${projectId}?${search.toString()}`;
   },
 
   getStats: (token: string, projectId: string, jobId?: string) => {
     const search = jobId ? `?job_id=${jobId}` : "";
-    return request<{ total_companies: number; total_products: number; by_category: Record<string, number> }>(
+    return request<{
+      total_companies: number;
+      total_products: number;
+      new_roles: number;
+      by_category: Record<string, number>;
+    }>(
       `/api/export/${projectId}/stats${search}`,
       token
     );

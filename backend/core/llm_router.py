@@ -1,25 +1,21 @@
 """
-Per-user LiteLLM Router factory. For Groq/Mistral, a user's own key (added in
-Settings) always takes priority over the shared system pool: if the user has
-at least one active key for a provider, ONLY their key(s) are used for that
-provider's model group and the system pool is left out entirely; the system
-pool (8 Groq + 8 Mistral from the shared env file) is only used as a fallback
-for users who have not added their own key for that provider yet. Claude/
-OpenAI/custom keys have no system equivalent and are always user-supplied.
+Per-user LiteLLM Router factory. Every key is the requesting user's own (added
+in Settings): there is no shared/system key pool at all, so a user who hasn't
+added a key for a provider simply has no deployments for that provider's model
+group. Jobs are refused up front when a required key is missing (see
+user_keys.ensure_required_keys), so build_router() raising below is only
+a last-resort guard.
 
 Every key is fanned out across every free model in its provider's catalog
 (see model_catalog.py) — Groq/Mistral rate-limit per model per org, so each
 extra model is an entirely separate quota bucket on the same key, not a
-slice of an existing one. PRIMARY-tier models are comparable-or-better than
-the old single default and are load-balanced interchangeably; OVERFLOW-tier
-models (much bigger daily budget, weaker model) are only reached once every
-PRIMARY deployment is already rate-limited, via `fallbacks` below.
+slice of an existing one. All Groq and Mistral deployments share ONE group
+(AGRI_MODEL), so usage-based routing spreads companies across both
+providers' free quotas and skips whichever deployments are rate-limited.
 
-The same priority also applies to the one Groq call that bypasses this
-Router entirely: the compound-beta URL-read fallback in pipeline.py calls
-Groq's raw API directly (see `pick_groq_fallback_key()` below), and it
-respects the exact same "user key present -> never touch the system pool"
-rule as everything else here.
+The Groq browser_search calls in url_reader.py bypass this Router entirely
+(raw API calls) and rotate across the user's Groq keys themselves - see
+`pick_groq_search_keys()` below.
 
 RPM/TPM counters used for routing decisions (`usage-based-routing-v2`) are
 process-local in-memory only - see the comment above `Router(**router_kwargs)`
@@ -30,12 +26,17 @@ unaffected by that decision.
 """
 from __future__ import annotations
 
+import logging
+import re
 import ssl
+import weakref
 
 import litellm
 from litellm import Router
+from litellm.integrations.custom_logger import CustomLogger
 
-from backend.config import get_settings
+logger = logging.getLogger("llm_router")
+
 from backend.core.model_catalog import (
     GROQ_OVERFLOW_MODELS,
     GROQ_PRIMARY_MODELS,
@@ -43,19 +44,23 @@ from backend.core.model_catalog import (
     ModelSpec,
 )
 
-FAST_MODEL = "fast"                    # Groq primary tier — classification + research
-FAST_OVERFLOW_MODEL = "fast_overflow"  # Groq overflow tier — only once FAST_MODEL is saturated
-STRUCTURED_MODEL = "structured"        # Mistral — structured product generation
-QUALITY_MODEL = "quality"              # user's Claude/OpenAI/custom key, if configured
+# Every free Groq AND Mistral (key, model) deployment in ONE group: the
+# agriculture analysis (agri_analyzer.py) is the only per-company LLM call,
+# and pooling both providers lets usage-based routing spread load across all
+# of them (and skip whichever are rate-limited) instead of saturating one
+# provider while the other's free quota sits idle.
+AGRI_MODEL = "agri"
+QUALITY_MODEL = "quality"  # user's Claude/OpenAI/custom key, if configured - fallback only
 
 # Mistral bills cached-prefix tokens at 10% instead of 100% when every call
-# shares the same `prompt_cache_key`. generate_products' system prompt +
-# schema (~600 tokens) is byte-identical across every company, so this is a
-# near-total-cost win on the biggest static chunk of that call. Baked into
-# every Mistral deployment's litellm_params (see _deployment()'s docstring
-# for why NOT a generic per-call kwarg). Version-suffixed so a future prompt
-# edit starts a fresh cache instead of silently caching stale text.
-MISTRAL_PROMPT_CACHE_KEY = "product-generation-v1"
+# shares the same `prompt_cache_key`. agri_analyzer's system prompt (rules +
+# ~2.7K-token taxonomy + schema) is byte-identical across every company, so
+# this is a near-total-cost win on the biggest static chunk of that call.
+# Baked into every Mistral deployment's litellm_params (see _deployment()'s
+# docstring for why NOT a generic per-call kwarg). Version-suffixed so a
+# future prompt edit starts a fresh cache instead of silently caching stale
+# text.
+MISTRAL_PROMPT_CACHE_KEY = "agri-analysis-v2"
 
 # litellm has no request timeout by default (falls back to the underlying
 # SDK's default, ~600s). A single hung network call at that length can pin a
@@ -134,6 +139,7 @@ def _deployment(
             "api_key": api_key,
             "rpm": spec.rpm,
             "tpm": spec.tpm,
+            **(spec.extra or {}),
             **(extra_litellm_params or {}),
         },
         "model_info": {"id": f"{key_ref}__{spec.tag}"},
@@ -157,7 +163,6 @@ def build_router(user_keys: list[dict] | None = None) -> Router:
     user_keys: list of {"id": str, "provider": "claude"|"openai"|"custom"|"groq"|"mistral",
                           "api_key": str, "model_name": str|None, "base_url": str|None}
     """
-    settings = get_settings()
     user_keys = [uk for uk in (user_keys or []) if uk.get("api_key")]
 
     model_list: list[dict] = []
@@ -169,47 +174,19 @@ def build_router(user_keys: list[dict] | None = None) -> Router:
         # colons anywhere here - see _deployment()'s docstring for why.
         return f"user-{uk['id']}" if uk.get("id") else f"user-anon-{id(uk)}"
 
-    user_groq_keys = [uk for uk in user_keys if uk.get("provider") == "groq"]
-    user_mistral_keys = [uk for uk in user_keys if uk.get("provider") == "mistral"]
-
-    # Groq: the user's own key(s), if any, entirely replace the system pool
-    # for this job - not merged/load-balanced alongside it - so "add your own
-    # key" actually means "use my key", not "add extra shared capacity".
-    if user_groq_keys:
-        for uk in user_groq_keys:
-            key_ref = _user_key_ref(uk)
-            _add_fanout(model_list, FAST_MODEL, key_ref, uk["api_key"], GROQ_PRIMARY_MODELS)
-            _add_fanout(model_list, FAST_OVERFLOW_MODEL, key_ref, uk["api_key"], GROQ_OVERFLOW_MODELS)
-    else:
-        for i, key in enumerate(settings.groq_keys):
-            key_ref = f"system-groq-{i}"
-            _add_fanout(model_list, FAST_MODEL, key_ref, key, GROQ_PRIMARY_MODELS)
-            _add_fanout(model_list, FAST_OVERFLOW_MODEL, key_ref, key, GROQ_OVERFLOW_MODELS)
-
-    # Mistral: same replace-not-merge priority as Groq above.
-    if user_mistral_keys:
-        for uk in user_mistral_keys:
-            key_ref = _user_key_ref(uk)
-            _add_fanout(
-                model_list, STRUCTURED_MODEL, key_ref, uk["api_key"], MISTRAL_PRIMARY_MODELS,
-                extra_litellm_params={"prompt_cache_key": MISTRAL_PROMPT_CACHE_KEY},
-            )
-    else:
-        for i, key in enumerate(settings.mistral_keys):
-            key_ref = f"system-mistral-{i}"
-            _add_fanout(
-                model_list, STRUCTURED_MODEL, key_ref, key, MISTRAL_PRIMARY_MODELS,
-                extra_litellm_params={"prompt_cache_key": MISTRAL_PROMPT_CACHE_KEY},
-            )
-
     for uk in user_keys:
         provider = uk.get("provider")
-        if provider in ("groq", "mistral"):
-            continue  # handled above, with system-pool-replacement priority
         api_key = uk["api_key"]
         key_ref = _user_key_ref(uk)
 
-        if provider == "claude":
+        if provider == "groq":
+            _add_fanout(model_list, AGRI_MODEL, key_ref, api_key, [*GROQ_PRIMARY_MODELS, *GROQ_OVERFLOW_MODELS])
+        elif provider == "mistral":
+            _add_fanout(
+                model_list, AGRI_MODEL, key_ref, api_key, MISTRAL_PRIMARY_MODELS,
+                extra_litellm_params={"prompt_cache_key": MISTRAL_PROMPT_CACHE_KEY},
+            )
+        elif provider == "claude":
             model_list.append(
                 {
                     "model_name": QUALITY_MODEL,
@@ -234,26 +211,21 @@ def build_router(user_keys: list[dict] | None = None) -> Router:
             )
 
     if not model_list:
-        raise RuntimeError("No LLM API keys configured (system or user).")
+        raise RuntimeError("No LLM API keys configured. Add your own Groq/Mistral keys in Settings -> API Keys.")
 
-    # QUALITY_MODEL/FAST_OVERFLOW_MODEL only have deployments if a matching
-    # key is actually configured. Unconditionally referencing an empty group
-    # in `fallbacks` means the moment the primary group hits a rate limit,
-    # LiteLLM's fallback chain tries to route to a model_name string with no
+    # QUALITY_MODEL only has deployments if a matching key is actually
+    # configured. Unconditionally referencing an empty group in `fallbacks`
+    # means the moment the primary group hits a rate limit, LiteLLM's
+    # fallback chain tries to route to a model_name string with no
     # deployments and hard-crashes with `litellm.BadRequestError` instead of
     # a clean rate-limit error - actively making the fallback mechanism
     # worse than having none. Only wire in fallbacks to a group that exists.
     configured_groups = {m["model_name"] for m in model_list}
     fallbacks = []
-    fast_fallbacks = [g for g in (FAST_OVERFLOW_MODEL, STRUCTURED_MODEL, QUALITY_MODEL) if g in configured_groups]
-    if fast_fallbacks:
-        fallbacks.append({FAST_MODEL: fast_fallbacks})
-    fast_overflow_fallbacks = [g for g in (STRUCTURED_MODEL, QUALITY_MODEL) if g in configured_groups]
-    if fast_overflow_fallbacks:
-        fallbacks.append({FAST_OVERFLOW_MODEL: fast_overflow_fallbacks})
-    structured_fallbacks = [g for g in (QUALITY_MODEL, FAST_MODEL) if g in configured_groups]
-    if structured_fallbacks:
-        fallbacks.append({STRUCTURED_MODEL: structured_fallbacks})
+    if AGRI_MODEL in configured_groups and QUALITY_MODEL in configured_groups:
+        fallbacks.append({AGRI_MODEL: [QUALITY_MODEL]})
+    if QUALITY_MODEL in configured_groups and AGRI_MODEL in configured_groups:
+        fallbacks.append({QUALITY_MODEL: [AGRI_MODEL]})
 
     router_kwargs: dict = dict(
         model_list=model_list,
@@ -262,15 +234,16 @@ def build_router(user_keys: list[dict] | None = None) -> Router:
         timeout=REQUEST_TIMEOUT,
         num_retries=3,
         retry_after=3,
-        # A short cooldown + more tolerance for transient blips avoids a
-        # cascade where a concurrency burst causes several keys to each hit
-        # `allowed_fails` around the same moment, briefly leaving ZERO
-        # deployments available for a full 60s ("No deployments available,
-        # try again in 60 seconds" — verified as the #1 real-world failure
-        # cause, well above actual 429s, once concurrency exceeds what our
-        # per-key TPM budgets can sustain).
+        # Default cooldown when a 429 carries no Retry-After header.
+        # `allowed_fails` is deliberately NOT set: setting it switches litellm
+        # to its legacy "cool down only after N fails per minute" logic,
+        # which kept re-sending companies to Groq keys whose DAILY token
+        # limit was already spent (~4,000 TPD 429s in one 21-minute run,
+        # each a wasted attempt and ~1/3 of companies failing). Without it,
+        # litellm's current logic cools a deployment down on its first 429
+        # for as long as the provider's Retry-After says, and
+        # _DailyLimitCooldown below extends that for daily-limit errors.
         cooldown_time=15,
-        allowed_fails=6,
     )
 
     # Deliberately NOT wiring redis_host/redis_port here for cross-process
@@ -288,41 +261,80 @@ def build_router(user_keys: list[dict] | None = None) -> Router:
     # end to end - there is no second process whose usage would otherwise
     # go untracked. If real multi-process horizontal scaling is added later,
     # this needs a genuinely compatible Redis (5+) before re-enabling.
-    return Router(**router_kwargs)
+    router = Router(**router_kwargs)
+    _install_daily_limit_cooldown()
+    _ROUTERS.add(router)
+    return router
 
 
-def pick_groq_fallback_key(user_keys: list[dict] | None = None) -> tuple[str | None, str | None]:
-    """Used by pipeline.py for the compound-beta URL-read fallback (raw Groq
-    API call, not via the Router, so it can't just pick a deployment out of
-    `build_router`'s model_list like every other Groq/Mistral call does).
+# ─────────── Daily-limit cooldown ───────────
+#
+# Groq's free tier also has a tokens-PER-DAY cap per (key, model). Once it's
+# hit, every call to that deployment fails until the rolling window frees up
+# - often an hour or more - and the error says how long ("Please try again
+# in 1h2m3.5s"). This rests that deployment for that long on every live
+# router (one per running job), so the work flows to deployments that still
+# have quota instead of being retried into the same wall.
 
-    Same replace-not-merge priority as build_router() above: if the user has
-    added their own active Groq key(s), the FIRST one is used here and the
-    system pool is never touched for this user at all. Only a user with zero
-    Groq keys of their own reaches the system pool - this must never silently
-    default to a system key "just for this one feature" while every other
-    Groq call in the same job correctly uses the user's own key; that would
-    be exactly the kind of unwanted, unrequested system-key usage users
-    adding their own keys are trying to avoid.
+_ROUTERS: "weakref.WeakSet[Router]" = weakref.WeakSet()
+_RETRY_IN_RE = re.compile(r"try again in\s+(?:(\d+)h)?\s*(?:(\d+)m)?\s*(?:([\d.]+)s)?", re.I)
+_DAILY_LIMIT_RE = re.compile(r"per day|\bTPD\b|\bRPD\b", re.I)
+_DEFAULT_DAILY_COOLDOWN_S = 30 * 60
 
-    Returns (api_key, key_ref) so usage_tracker.py can still attribute this
-    raw call back to the right physical key, matching the id scheme
-    `_deployment()` uses for every router-routed call.
-    """
-    user_groq_keys = [uk for uk in (user_keys or []) if uk.get("provider") == "groq" and uk.get("api_key")]
-    if user_groq_keys:
-        uk = user_groq_keys[0]
-        key_ref = f"user-{uk['id']}" if uk.get("id") else f"user-anon-{id(uk)}"
-        return uk["api_key"], key_ref
 
-    keys = get_settings().groq_keys
-    if not keys:
-        return None, None
-    return keys[0], "system-groq-0"
+def _parse_retry_in(message: str) -> float | None:
+    m = _RETRY_IN_RE.search(message)
+    if not m or not any(m.groups()):
+        return None
+    hours, minutes, seconds = (float(g) if g else 0.0 for g in m.groups())
+    return hours * 3600 + minutes * 60 + seconds
+
+
+class _DailyLimitCooldown(CustomLogger):
+    async def async_log_failure_event(self, kwargs, response_obj, start_time, end_time):
+        try:
+            message = str(kwargs.get("exception") or "")
+            if not _DAILY_LIMIT_RE.search(message):
+                return
+            model_info = (kwargs.get("litellm_params") or {}).get("model_info") or {}
+            deployment_id = model_info.get("id")
+            if not deployment_id:
+                return
+            seconds = max(_parse_retry_in(message) or _DEFAULT_DAILY_COOLDOWN_S, 60.0)
+            for router in list(_ROUTERS):
+                if deployment_id in router.get_model_ids():
+                    router.cooldown_cache.add_deployment_to_cooldown(
+                        model_id=deployment_id,
+                        original_exception=kwargs.get("exception"),
+                        exception_status=429,
+                        cooldown_time=seconds,
+                    )
+            logger.info("Daily limit hit on %s - resting it for %.0f min", deployment_id, seconds / 60)
+        except Exception:  # noqa: BLE001 - a logging hook must never break a request
+            logger.debug("daily-limit cooldown hook failed", exc_info=True)
+
+
+def _install_daily_limit_cooldown() -> None:
+    if not any(isinstance(cb, _DailyLimitCooldown) for cb in litellm.callbacks):
+        litellm.callbacks.append(_DailyLimitCooldown())
+
+
+def pick_groq_search_keys(user_keys: list[dict] | None = None) -> list[tuple[str, str]]:
+    """Every one of the user's active Groq keys as (api_key, key_ref), for
+    url_reader.GroqSearchPool - the browser_search calls (no-website web
+    search + URL-read fallback) bypass the Router, so they rotate across the
+    keys themselves. key_ref matches `_deployment()`'s id scheme so
+    usage_tracker.py attributes these raw calls to the right physical key.
+    Empty when the user has no Groq key: searching is then simply skipped."""
+    return [
+        (uk["api_key"], f"user-{uk['id']}" if uk.get("id") else f"user-anon-{id(uk)}")
+        for uk in (user_keys or [])
+        if uk.get("provider") == "groq" and uk.get("api_key")
+    ]
 
 
 def pick_jina_key(user_keys: list[dict] | None = None) -> tuple[str | None, str | None]:
-    """Jina Reader has no system-level key pool at all (see config.py) - it
+    """Like every provider, Jina Reader has no system-level key (see config.py) - it
     is either called with the requesting USER's own key (first active one
     they've added in Settings, provider="jina") or, if they haven't added
     one, with no key at all. url_reader.py's unauthenticated fallback within
@@ -331,7 +343,7 @@ def pick_jina_key(user_keys: list[dict] | None = None) -> tuple[str | None, str 
     error - it must NEVER be filled in with any shared/system credential.
 
     Returns (api_key, key_ref) so usage_tracker.py can attribute Reader
-    calls back to the right physical key, exactly like pick_groq_fallback_key.
+    calls back to the right physical key, exactly like pick_groq_search_keys.
     """
     user_jina_keys = [uk for uk in (user_keys or []) if uk.get("provider") == "jina" and uk.get("api_key")]
     if not user_jina_keys:

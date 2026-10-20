@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import AsyncIterator
 
+import sqlalchemy as sa
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -37,9 +38,29 @@ if _IS_SQLITE:
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
 
+def _add_missing_columns(sync_conn) -> None:
+    """`create_all` only creates missing TABLES - a column added to a model
+    later never reaches an existing database. Adds any missing (nullable)
+    columns in place so existing data (users, API keys) survives model
+    changes without a manual migration. Columns removed from a model are
+    left untouched in the table; nothing reads them."""
+    inspector = sa.inspect(sync_conn)
+    existing_tables = set(inspector.get_table_names())
+    for table in Base.metadata.sorted_tables:
+        if table.name not in existing_tables:
+            continue
+        have = {c["name"] for c in inspector.get_columns(table.name)}
+        for column in table.columns:
+            if column.name in have or not column.nullable:
+                continue
+            col_type = column.type.compile(dialect=sync_conn.dialect)
+            sync_conn.execute(sa.text(f'ALTER TABLE "{table.name}" ADD COLUMN "{column.name}" {col_type}'))
+
+
 async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(_add_missing_columns)
 
 
 async def get_session() -> AsyncIterator[AsyncSession]:

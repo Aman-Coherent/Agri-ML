@@ -33,9 +33,17 @@ export function FormatGuideModal() {
 
         <div className="space-y-3 text-sm">
           <div className="rounded-md border p-3">
+            <p className="font-medium">Lead ID / Native ID <span className="text-destructive">*required*</span></p>
+            <p className="text-muted-foreground text-xs mt-0.5">
+              Your own record id, included in every export so results match back to your data.
+              Matches headers like <code>Lead ID</code>, <code>Native ID</code>, <code>Lead No</code>,{" "}
+              <code>Record ID</code>, <code>CRM ID</code>, <code>Company ID</code> or <code>id</code>.
+            </p>
+          </div>
+          <div className="rounded-md border p-3">
             <p className="font-medium">Company name <span className="text-destructive">*required*</span></p>
             <p className="text-muted-foreground text-xs mt-0.5">
-              e.g. &quot;Amcor PLC&quot;. Matches headers like <code>company_name</code>,{" "}
+              e.g. &quot;Rasi Seeds&quot;. Matches headers like <code>company_name</code>,{" "}
               <code>Company</code>, <code>Company Name</code>, <code>Business Name</code>,{" "}
               <code>Organization</code>, <code>Supplier</code>, <code>Vendor</code>, or{" "}
               <code>Name</code>.
@@ -44,10 +52,10 @@ export function FormatGuideModal() {
           <div className="rounded-md border p-3">
             <p className="font-medium">Website URL <span className="text-muted-foreground font-normal">(strongly recommended)</span></p>
             <p className="text-muted-foreground text-xs mt-0.5">
-              e.g. &quot;https://amcor.com&quot;. Matches <code>url</code>, <code>website</code>,{" "}
-              <code>domain</code>, <code>homepage</code>, <code>link</code>, etc. Our LLM pipeline
-              reads this page directly to ground classification and product generation in real
-              content. If the URL fails or is missing, we automatically fall back to name + location.
+              e.g. &quot;rasiseeds.com&quot;. Matches <code>url</code>, <code>website</code>,{" "}
+              <code>domain</code>, <code>homepage</code>, <code>link</code>, etc. The homepage and its
+              product pages are read to find real roles and products. Without a website, the web is
+              searched by company name + location instead.
             </p>
           </div>
           <div className="rounded-md border p-3">
@@ -63,11 +71,11 @@ export function FormatGuideModal() {
 
         <div className="rounded-md bg-muted p-3">
           <p className="text-xs font-mono text-muted-foreground">
-            Company Name,City,Country,Website
+            Lead ID,Company Name,City,Country,Website
             <br />
-            Amcor PLC,Zürich,Switzerland,https://amcor.com
+            L-1001,Rasi Seeds,Attur,India,https://www.rasiseeds.com
             <br />
-            Tata Steel,Mumbai,India,https://tatasteel.com
+            L-1002,Sri Lakshmi Fertilizers,Guntur,India,
           </p>
         </div>
 

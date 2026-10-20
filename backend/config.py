@@ -21,14 +21,12 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=str(ENV_FILE), extra="ignore")
 
-    # LLM keys (comma-separated, rotated across requests)
-    GROQ_API_KEYS: str = ""
-    MISTRAL_API_KEY: str = ""
-    # No system-level Jina key by design: unlike Groq/Mistral there is no
-    # shared pool to fall back to - Jina Reader is either called with a
-    # specific USER's own key (see llm_router.pick_jina_key /
-    # UserApiKey(provider="jina")) or, if the user hasn't added one, with no
-    # key at all (Jina's public unauthenticated tier). See url_reader.py.
+    # No system-level LLM keys by design: there is no shared Groq/Mistral/Jina
+    # pool. Every LLM call uses the requesting USER's own keys (added in
+    # Settings -> API Keys, stored encrypted as UserApiKey rows). A job is
+    # refused up front if the user is missing a key it needs (see
+    # user_keys.ensure_required_keys). Jina Reader alone may run with no
+    # key at all (Jina's public unauthenticated tier) - see url_reader.py.
 
     # Infra
     # Redis DB 1 (not 0) so this project's job queue/state never mixes with
@@ -67,14 +65,6 @@ class Settings(BaseSettings):
                 abs_path.parent.mkdir(parents=True, exist_ok=True)
                 return f"{prefix}{abs_path.as_posix()}"
         return v
-
-    @property
-    def groq_keys(self) -> list[str]:
-        return [k.strip() for k in self.GROQ_API_KEYS.split(",") if k.strip()]
-
-    @property
-    def mistral_keys(self) -> list[str]:
-        return [k.strip() for k in self.MISTRAL_API_KEY.split(",") if k.strip()]
 
     @property
     def cors_origins_list(self) -> list[str]:

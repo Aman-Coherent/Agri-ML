@@ -52,12 +52,12 @@ export default function SettingsPage() {
 
       <Alert>
         <Info className="size-4" />
-        <AlertTitle>Your own key is always used first</AlertTitle>
+        <AlertTitle>Bring your own API keys</AlertTitle>
         <AlertDescription>
-          A shared system pool of Groq and Mistral keys is used by default so you can run jobs
-          immediately. The moment you add your own Groq or Mistral key below, it fully replaces
-          the system pool for your jobs — the shared keys are no longer used at all. Add Claude or
-          OpenAI as an optional quality fallback tier.
+          Jobs run only on the keys you add below — no shared keys are provided. Add a Groq key
+          to run classification, plus a Mistral key for product generation. Add several keys of
+          the same provider to spread the load across them. Claude or OpenAI can be added as an
+          optional quality fallback tier.
         </AlertDescription>
       </Alert>
 

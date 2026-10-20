@@ -20,9 +20,8 @@ _KEY_SPLIT_RE = re.compile(r"[,\n]+")
 
 
 def _split_keys(raw: str) -> list[str]:
-    """Splits a pasted comma- and/or newline-separated blob of keys (the
-    same format used for GROQ_API_KEYS/MISTRAL_API_KEY in the system env
-    file) into a de-duplicated, order-preserving list of individual keys."""
+    """Splits a pasted comma- and/or newline-separated blob of keys into a
+    de-duplicated, order-preserving list of individual keys."""
     seen: set[str] = set()
     result: list[str] = []
     for part in _KEY_SPLIT_RE.split(raw):
@@ -131,8 +130,7 @@ async def add_keys_bulk(
 ):
     """
     Accepts one label plus one-or-more comma/newline-separated API keys
-    (mirroring the system's own GROQ_API_KEYS/MISTRAL_API_KEY rotation
-    format). A single key keeps the label exactly as typed; multiple keys
+    (each key is rotated across requests). A single key keeps the label exactly as typed; multiple keys
     are auto-numbered "<label> 1", "<label> 2", ... so a user can paste an
     entire batch of keys at once instead of adding them one by one.
     """

@@ -69,10 +69,17 @@ export function CsvUploadZone({ onFileSelected, uploadResult, isUploading }: Pro
           <div className="flex items-center gap-2 text-sm">
             <CheckCircle2 className="size-4 text-emerald-500" />
             <span className="font-medium">{uploadResult.total_rows.toLocaleString()} companies ready</span>
+            <span className="text-xs text-muted-foreground">
+              ({uploadResult.with_website.toLocaleString()} with website,{" "}
+              {uploadResult.without_website.toLocaleString()} without)
+            </span>
           </div>
 
           <div className="flex flex-wrap items-center gap-1.5 text-xs">
             <span className="text-muted-foreground">Detected columns:</span>
+            <Badge variant="secondary" className="font-normal">
+              lead id ← {uploadResult.detected_columns.native_id}
+            </Badge>
             <Badge variant="secondary" className="font-normal">
               name ← {uploadResult.detected_columns.company_name}
             </Badge>

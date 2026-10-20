@@ -1,7 +1,7 @@
 """
-Fuzzy CSV header detection used by routers/projects.py (product
-generation) - turns an arbitrary real-world company-list CSV into
-(company_name, url, location) columns.
+Fuzzy CSV header detection used by routers/projects.py - turns an
+arbitrary real-world company-list CSV into (company_name, url, location,
+native/lead id) columns.
 
 Extracted verbatim from the original routers/projects.py implementation.
 """
@@ -50,6 +50,36 @@ _METADATA_TOKENS = {
 }
 
 
+# The user's own record id, carried into every export. Exact names first (in
+# priority order), then any header combining an id-ish token with one of the
+# id-owner words below (e.g. "Lead No", "CRM Record ID", "native_lead_id").
+NATIVE_ID_ALIASES = [
+    "native_id", "nativeid", "native", "lead_id", "leadid", "lead", "record_id",
+    "recordid", "crm_id", "crmid", "company_id", "companyid", "account_id",
+    "accountid", "customer_id", "customerid", "client_id", "clientid",
+    "unique_id", "uniqueid", "external_id", "externalid", "reference_id", "ref_id",
+    "uid", "id",
+]
+_ID_OWNER_TOKENS = {"native", "lead", "record", "crm", "company", "account", "customer", "client", "unique", "external", "ref", "reference"}
+_ID_TOKENS = {"id", "no", "number", "num", "code"}
+
+
+def resolve_native_id_column(fieldnames: list[str]) -> str | None:
+    normalized = [(h, normalize_header(h)) for h in fieldnames]
+    for alias in NATIVE_ID_ALIASES:
+        for orig, norm in normalized:
+            if norm == alias:
+                return orig
+    for orig, norm in normalized:
+        tokens = set(norm.split("_"))
+        squashed = norm.replace("_", "")
+        if (tokens & _ID_OWNER_TOKENS and tokens & _ID_TOKENS) or any(
+            squashed == f"{owner}{idt}" for owner in _ID_OWNER_TOKENS for idt in _ID_TOKENS
+        ):
+            return orig
+    return None
+
+
 def normalize_header(header: str) -> str:
     header = header.strip().lower()
     header = re.sub(r"[^a-z0-9]+", "_", header)
@@ -60,14 +90,17 @@ def _is_metadata_column(norm: str) -> bool:
     return any(token in _METADATA_TOKENS for token in norm.split("_"))
 
 
-def resolve_columns(fieldnames: list[str]) -> tuple[str | None, str | None, list[str]]:
+def resolve_columns(fieldnames: list[str]) -> tuple[str | None, str | None, list[str], str | None]:
     """
     Maps a CSV's actual headers onto (company_name_column, url_column,
-    location_columns). `location_columns` can be multiple headers (e.g.
-    separate City/State/Country columns) which get combined into one string
-    per row, since that's how most real-world exports are structured.
+    location_columns, native_id_column). `location_columns` can be multiple
+    headers (e.g. separate City/State/Country columns) which get combined
+    into one string per row, since that's how most real-world exports are
+    structured. The id column is resolved first and taken out of the pool so
+    e.g. "Company ID" can never be mistaken for the company name.
     """
-    pool = [(h, normalize_header(h)) for h in fieldnames]
+    id_col = resolve_native_id_column(fieldnames)
+    pool = [(h, normalize_header(h)) for h in fieldnames if h != id_col]
 
     def take_exact(aliases: list[str]) -> str | None:
         for alias in aliases:
@@ -102,4 +135,4 @@ def resolve_columns(fieldnames: list[str]) -> tuple[str | None, str | None, list
     # combined "City, State, Country" string reads naturally.
     location_cols = [h for h in fieldnames if h in location_cols]
 
-    return company_col, url_col, location_cols
+    return company_col, url_col, location_cols, id_col

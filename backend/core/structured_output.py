@@ -131,6 +131,7 @@ async def generate_structured(
     max_tokens: int = 1500,
     max_retries: int = 2,
     extra_params: dict | None = None,
+    validation_context: dict | None = None,
 ) -> T:
     """Calls the LLM in `json_object` mode and validates the result against
     `schema_cls`, retrying with a corrective follow-up message up to
@@ -150,7 +151,12 @@ async def generate_structured(
     provider's own deployments' `litellm_params` in llm_router.py instead
     (see MISTRAL_PROMPT_CACHE_KEY there for the pattern) - this parameter
     should only be used for params that are safe on every deployment in the
-    `model` alias's full fallback chain."""
+    `model` alias's full fallback chain.
+
+    `validation_context` is passed to pydantic as `context=` so a schema's
+    validators can check the output against call-specific facts (e.g. the
+    company's own name); `final_attempt` (True on the last try) is added to
+    it automatically."""
     working_messages = list(messages)
     last_error: Exception | None = None
     last_raw: str | None = None
@@ -170,7 +176,10 @@ async def generate_structured(
             if not last_raw or not last_raw.strip():
                 raise ValueError("Model returned an empty response")
             data = json.loads(last_raw)
-            return schema_cls.model_validate(data)
+            # `final_attempt` lets a schema accept a nearly-right answer on
+            # the last try instead of discarding the whole result.
+            context = {**(validation_context or {}), "final_attempt": attempt == max_retries}
+            return schema_cls.model_validate(data, context=context)
         except (json.JSONDecodeError, ValidationError, ValueError) as exc:
             last_error = exc
             logger.warning(

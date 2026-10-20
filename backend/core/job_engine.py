@@ -1,6 +1,6 @@
 """
 Runs one job to completion: fans out per-company processing with a bounded
-semaphore, supports cooperative pause/cancel via Redis-backed control
+worker pool, supports cooperative pause/cancel via Redis-backed control
 flags (so the FastAPI process can signal a running ARQ worker process),
 writes checkpoints, batches Parquet writes, and publishes SSE progress
 events over Redis pub/sub.
@@ -33,9 +33,10 @@ from backend.core.job_control import (
     request_resume,
     run_lock_key as _run_lock_key,
 )
-from backend.core.llm_router import build_router, pick_groq_fallback_key, pick_jina_key
+from backend.core.llm_router import build_router, pick_groq_search_keys, pick_jina_key
 from backend.core.models import CompanyResult, SSEEvent, SSEEventType
 from backend.core.pipeline import process_company
+from backend.core.url_reader import GroqSearchPool
 from backend.core.user_keys import load_user_keys as _load_user_keys
 from backend.db.models import CompanyInput, Job
 from backend.storage.parquet_writer import ParquetBatchWriter
@@ -140,14 +141,18 @@ class JobEngine:
             job.started_at = datetime.now(timezone.utc)
             await session.commit()
 
+            # Only the 5 columns processing needs, as lightweight rows - full
+            # ORM objects for a 6-lakh-company project would cost ~1 GB.
             companies_result = await session.execute(
-                select(CompanyInput).where(
-                    CompanyInput.project_id == job.project_id, CompanyInput.status != "done"
+                select(
+                    CompanyInput.id, CompanyInput.native_id, CompanyInput.company_name,
+                    CompanyInput.location, CompanyInput.url,
                 )
+                .where(CompanyInput.project_id == job.project_id, CompanyInput.status != "done")
+                .order_by(CompanyInput.row_index)
             )
-            companies = list(companies_result.scalars().all())
+            companies = list(companies_result.all())
             user_keys = await _load_user_keys(session, job.user_id)
-            mode = job.mode
             concurrency = job.concurrency or self.concurrency
             project_id = job.project_id
 
@@ -158,15 +163,13 @@ class JobEngine:
 
         router = build_router(user_keys)
         # Dynamic attribute (not a real litellm.Router field) so
-        # structured_output.generate_structured / url_reader can record
-        # per-key usage without threading a redis handle through every layer
-        # of pipeline.py -> classifier.py/generator.py.
+        # structured_output.generate_structured can record per-key usage
+        # without threading a redis handle through every layer.
         router._usage_redis = self.redis
-        groq_fallback_key, groq_fallback_key_ref = pick_groq_fallback_key(user_keys)
+        search_pool = GroqSearchPool(pick_groq_search_keys(user_keys))
         jina_api_key, jina_key_ref = pick_jina_key(user_keys)
         writer = ParquetBatchWriter(job_id, project_id, batch_size=100)
 
-        semaphore = asyncio.Semaphore(concurrency)
         state = {"paused": False, "cancelled": False}
         tasks: list[asyncio.Task] = []
 
@@ -198,84 +201,79 @@ class JobEngine:
                     return
                 await asyncio.sleep(1)
 
-        async def _process_one(company: CompanyInput) -> None:
-            # The try/except wraps the ENTIRE body, including semaphore
-            # acquisition, not just process_company: _watch_control can call
-            # t.cancel() on a task that's still queued waiting on
-            # `semaphore.acquire()` (never even started), and that
-            # CancelledError surfaces at the `async with semaphore:` line
-            # itself - outside a narrower try block. Left uncaught there, it
-            # would escape this coroutine entirely, and since
+        async def _process_one(company) -> None:
+            # The try/except wraps the ENTIRE body: _watch_control can
+            # t.cancel() a worker anywhere in here, and since
             # asyncio.CancelledError subclasses BaseException (not
-            # Exception), it would blow straight through asyncio.gather()
-            # and the generic `except Exception` in JobEngine.run(), acting
-            # as an unhandled crash instead of the quiet "not processed this
-            # run" outcome intended here.
+            # Exception), letting it escape would blow straight through
+            # asyncio.gather() and the generic `except Exception` in
+            # JobEngine.run(), acting as an unhandled crash instead of the
+            # quiet "not processed this run" outcome intended here.
             try:
-                async with semaphore:
-                    control = await _get_control(self.redis, job_id)
-                    if control == "cancel":
-                        state["cancelled"] = True
-                        return
-                    if control == "pause":
-                        state["paused"] = True
-                        return
-
-                    result: CompanyResult = await process_company(
-                        router,
-                        self.redis,
-                        company.id,
-                        company.company_name,
-                        company.location,
-                        company.url,
-                        mode,
-                        groq_fallback_key=groq_fallback_key,
-                        groq_fallback_key_ref=groq_fallback_key_ref,
-                        jina_api_key=jina_api_key,
-                        jina_key_ref=jina_key_ref,
+                result: CompanyResult = await process_company(
+                    router,
+                    self.redis,
+                    company.id,
+                    company.native_id,
+                    company.company_name,
+                    company.location,
+                    company.url,
+                    search_pool=search_pool,
+                    jina_api_key=jina_api_key,
+                    jina_key_ref=jina_key_ref,
+                )
+                writer.add(result)
+                async with self._checkpoint_lock:
+                    await append_checkpoint(
+                        job_id, company.id, "done" if result.success else "failed", result.error
                     )
-                    writer.add(result)
-                    async with self._checkpoint_lock:
-                        await append_checkpoint(
-                            job_id, company.id, "done" if result.success else "failed", result.error
+
+                async with self._counters_lock:
+                    async with self.session_factory() as write_session:
+                        job_row, done, failed, total = await self._apply_result(
+                            write_session, job_id, company.id, result
                         )
 
-                    async with self._counters_lock:
-                        async with self.session_factory() as write_session:
-                            job_row, done, failed, total = await self._apply_result(
-                                write_session, job_id, company.id, result
-                            )
-
-                    await self._publish(
-                        job_id,
-                        SSEEventType.COMPANY_DONE if result.success else SSEEventType.COMPANY_FAILED,
-                        {
-                            "company_id": company.id,
-                            "company_name": company.company_name,
-                            "url_source": result.url_read.source.value,
-                            "display_label": result.classification.display_label if result.classification else None,
-                            "products_count": len(result.products.products) if result.products else 0,
-                            "error": result.error,
-                        },
-                    )
-                    pct = round(100 * (done + failed) / total, 2) if total else 0.0
-                    await self._publish(
-                        job_id, SSEEventType.PROGRESS, {"done": done, "failed": failed, "total": total, "percent": pct}
-                    )
+                await self._publish(
+                    job_id,
+                    SSEEventType.COMPANY_DONE if result.success else SSEEventType.COMPANY_FAILED,
+                    {
+                        "company_id": company.id,
+                        "company_name": company.company_name,
+                        "url_source": result.url_read.source.value,
+                        "display_label": result.profile.summary_label() if result.profile else None,
+                        "products_count": len(result.profile.products) if result.profile else 0,
+                        "error": result.error,
+                    },
+                )
+                pct = round(100 * (done + failed) / total, 2) if total else 0.0
+                await self._publish(
+                    job_id, SSEEventType.PROGRESS, {"done": done, "failed": failed, "total": total, "percent": pct}
+                )
             except asyncio.CancelledError:
-                # _watch_control cancelled us mid-flight (Stop/Pause
-                # requested while this company was anywhere in the block
-                # above). state["cancelled"/"paused"] is already set by the
-                # watcher; swallow here rather than re-raising so
-                # asyncio.gather() below doesn't abort every sibling task
-                # early or propagate out of _run_locked as a real crash. If
-                # the checkpoint was already written before cancellation
-                # landed, this company is correctly treated as done/failed
-                # already; otherwise it stays "pending" and is picked up
-                # again on the next run.
+                # _watch_control cancelled us mid-flight (Stop/Pause).
+                # state["cancelled"/"paused"] is already set by the watcher;
+                # swallow here rather than re-raising so asyncio.gather()
+                # below doesn't propagate it out of _run_locked as a real
+                # crash. If the checkpoint was already written before
+                # cancellation landed, this company is correctly treated as
+                # done/failed already; otherwise it stays "pending" and is
+                # picked up again on the next run.
                 return
 
-        tasks.extend(asyncio.create_task(_process_one(c)) for c in pending)
+        # A fixed pool of `concurrency` workers pulling from one shared
+        # iterator, instead of one asyncio.Task per company: at 6 lakh
+        # companies, creating every task up front costs gigabytes and makes
+        # Stop/Pause cancel hundreds of thousands of tasks.
+        remaining = iter(pending)
+
+        async def _worker() -> None:
+            for company in remaining:
+                if state["cancelled"] or state["paused"]:
+                    return
+                await _process_one(company)
+
+        tasks.extend(asyncio.create_task(_worker()) for _ in range(min(concurrency, len(pending))))
         watcher_task = asyncio.create_task(_watch_control()) if tasks else None
         try:
             if tasks:
@@ -318,19 +316,20 @@ class JobEngine:
         company.url_read_source = result.url_read.source.value if result.url_read else None
         company.url_read_success = result.url_read.success if result.url_read else False
         company.url_markdown_tokens = result.url_read.token_estimate if result.url_read else 0
-        company.url_error = result.url_read.error if result.url_read else None
+        company.url_error = (result.url_read.error or "")[:200] or None if result.url_read else None
         company.processing_time_ms = result.processing_time_ms
         company.last_job_id = job_id
 
-        if result.classification:
-            company.supply_chain_primary = result.classification.primary_category.value
-            company.supply_chain_all = json.dumps([c.value for c in result.classification.all_categories])
-            company.display_label = result.classification.display_label
-            company.classification_confidence = result.classification.confidence
-            company.is_multi = result.classification.is_multi
-
-        if result.products:
-            company.products_count = len(result.products.products)
+        if result.profile:
+            profile = result.profile
+            company.description = profile.description
+            company.is_agriculture = profile.is_agriculture
+            company.roles_json = json.dumps([r.model_dump() for r in profile.roles])
+            company.has_new_roles = profile.has_new
+            company.display_label = profile.summary_label()
+            company.classification_confidence = profile.confidence
+            company.products_count = len(profile.products)
+            company.error_message = None
 
         if not result.success:
             company.error_message = result.error

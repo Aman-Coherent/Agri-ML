@@ -41,7 +41,7 @@ export function CircuitBreakerIndicator({ token, active }: { token: string | nul
       />
       <TooltipContent>
         Jina Reader failed {data.failures} times in a row. Automatically routing website reads through
-        Groq compound-beta for the next {Math.ceil(data.reset_in_s)}s.
+        Groq browser search for the next {Math.ceil(data.reset_in_s)}s.
       </TooltipContent>
     </Tooltip>
   );

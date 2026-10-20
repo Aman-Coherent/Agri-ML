@@ -120,36 +120,11 @@ export function ApiKeyTable({
   }
 
   const usageByRef = new Map((usage ?? []).map((u) => [u.key_ref, u]));
-  const systemUsage = (usage ?? []).filter((u) => u.is_system);
-  // Mirrors backend/core/llm_router.py's priority rule: an active user key
-  // for groq/mistral fully replaces the matching system pool for that
-  // provider, it isn't pooled alongside it - so the table should say so
-  // instead of implying the (now-idle) system rows are still in the mix.
-  const overriddenProviders = new Set(
-    keys.filter((k) => k.is_active && (k.provider === "groq" || k.provider === "mistral")).map((k) => k.provider)
-  );
 
-  // Active system keys are shown individually (each has its own real usage/
-  // remaining stats, useful for seeing the rotation in action). Once a
-  // provider is overridden by the user's own key, none of those system keys
-  // are used for anything anymore - listing all 8 Groq + N Mistral rows as
-  // separate "Not used" entries just reads as clutter/duplicates, so they're
-  // collapsed into a single summary row per provider instead.
-  const activeSystemRows = systemUsage.filter((u) => !overriddenProviders.has(u.provider));
-  const inactiveSystemGroups = Array.from(
-    systemUsage
-      .filter((u) => overriddenProviders.has(u.provider))
-      .reduce((groups, u) => {
-        groups.set(u.provider, (groups.get(u.provider) ?? 0) + 1);
-        return groups;
-      }, new Map<string, number>())
-      .entries()
-  );
-
-  if (keys.length === 0 && systemUsage.length === 0) {
+  if (keys.length === 0) {
     return (
       <div className="flex items-center justify-center rounded-lg border border-dashed py-10 text-sm text-muted-foreground">
-        No API keys added yet. The system-provided Groq and Mistral keys will be used by default.
+        No API keys added yet. Add your own Groq and Mistral keys to start running jobs.
       </div>
     );
   }
@@ -169,56 +144,6 @@ export function ApiKeyTable({
         </TableRow>
       </TableHeader>
       <TableBody>
-        {activeSystemRows.map((u) => (
-          <TableRow key={u.key_ref} className="bg-muted/30">
-            <TableCell>
-              <Badge variant="outline" className="capitalize font-normal">
-                {u.provider}
-              </Badge>
-            </TableCell>
-            <TableCell className="font-medium">{u.label}</TableCell>
-            <TableCell className="font-mono text-xs text-muted-foreground">{u.masked_key}</TableCell>
-            <TableCell>
-              <UsageCell usage={u} />
-            </TableCell>
-            <TableCell>
-              <RemainingCell usage={u} />
-            </TableCell>
-            <TableCell className="text-xs text-muted-foreground">System pool</TableCell>
-            <TableCell>
-              <Badge variant="secondary" className="font-normal">
-                Shared
-              </Badge>
-            </TableCell>
-            <TableCell />
-          </TableRow>
-        ))}
-        {inactiveSystemGroups.map(([provider, count]) => (
-          <TableRow key={`system-inactive-${provider}`} className="opacity-50">
-            <TableCell>
-              <Badge variant="outline" className="capitalize font-normal">
-                {provider}
-              </Badge>
-            </TableCell>
-            <TableCell className="font-medium text-muted-foreground" colSpan={4}>
-              System pool ({count} key{count === 1 ? "" : "s"})
-            </TableCell>
-            <TableCell className="text-xs text-muted-foreground">System pool</TableCell>
-            <TableCell>
-              <Tooltip>
-                <TooltipTrigger>
-                  <Badge variant="outline" className="font-normal">
-                    Not used
-                  </Badge>
-                </TooltipTrigger>
-                <TooltipContent side="left">
-                  Your own {provider} key below is used instead of these {count} system keys.
-                </TooltipContent>
-              </Tooltip>
-            </TableCell>
-            <TableCell />
-          </TableRow>
-        ))}
         {keys.map((key) => {
           const keyUsage = usageByRef.get(`user-${key.id}`);
           return (

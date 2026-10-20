@@ -110,6 +110,6 @@ class WorkerSettings:
     on_shutdown = shutdown
     redis_settings = RedisSettings.from_dsn(get_settings().REDIS_URL)
     max_jobs = 10          # up to 10 jobs (projects) processed concurrently
-    job_timeout = 86400    # 24h — enough for a 200K-company job
+    job_timeout = 30 * 86400  # 30 days - a 6-lakh-company job on free-tier keys can run for days
     max_tries = 3          # auto-retry on crash; checkpoint makes retries cheap
     keep_result = 3600

@@ -1,7 +1,7 @@
 """
-Real per-key, per-model usage tracking for every configured Groq/Mistral API
-key (system pool + user-added) plus every user-added Jina Reader key (no
-system pool exists for Jina - see config.py/llm_router.pick_jina_key), so
+Real per-key, per-model usage tracking for every user-added Groq/Mistral API
+key plus every user-added Jina Reader key (there is no system key pool - see
+config.py), so
 Settings can show "how much of today's free quota is left" instead of the
 user finding out via a wall of 429s.
 
@@ -41,7 +41,6 @@ from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.config import get_settings
 from backend.core.model_catalog import specs_for_provider
 from backend.db.models import UserApiKey
 
@@ -199,22 +198,11 @@ def _decode_hash(raw: dict | None) -> dict:
 
 
 async def _enumerate_physical_keys(session: AsyncSession, user_id: str) -> list[dict]:
-    settings = get_settings()
     items: list[dict] = []
-    for i, key in enumerate(settings.groq_keys):
-        items.append(
-            {"key_ref": f"system-groq-{i}", "provider": "groq", "label": f"System Groq #{i + 1}", "masked_key": _mask(key), "is_system": True}
-        )
-    for i, key in enumerate(settings.mistral_keys):
-        items.append(
-            {"key_ref": f"system-mistral-{i}", "provider": "mistral", "label": f"System Mistral #{i + 1}", "masked_key": _mask(key), "is_system": True}
-        )
-
-    # "jina" is included here even though it has no system-pool counterpart
-    # above (see config.py/llm_router.pick_jina_key) - a user's Jina key is
-    # the ONLY way Reader calls ever get authenticated, so it must show up
-    # in the same usage table as everything else or there's no way to tell
-    # it's actually being used.
+    # Only the user's own keys - there is no system pool (see config.py).
+    # "jina" is included because a user's Jina key is the ONLY way Reader
+    # calls ever get authenticated, so it must show up in the same usage
+    # table as everything else or there's no way to tell it's being used.
     result = await session.execute(
         select(UserApiKey).where(UserApiKey.user_id == user_id, UserApiKey.provider.in_(("groq", "mistral", "jina")))
     )

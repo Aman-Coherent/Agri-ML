@@ -86,11 +86,17 @@ export function JobToolbar({ job, token, projectId, hasFailed, hasCompanies }: P
               results, not just whichever job happens to be latest - a
               company completed by an earlier run is otherwise silently
               missing (see backend/storage/duckdb_queries.py job_id filter). */}
-          <DropdownMenuItem render={<a href={token ? api.exportUrl(projectId, "csv", token) : "#"} />}>
-            Export as CSV
+          <DropdownMenuItem render={<a href={token ? api.exportUrl(projectId, "csv", token, "entities") : "#"} />}>
+            Entities & roles (CSV)
           </DropdownMenuItem>
-          <DropdownMenuItem render={<a href={token ? api.exportUrl(projectId, "json", token) : "#"} />}>
-            Export as JSON
+          <DropdownMenuItem render={<a href={token ? api.exportUrl(projectId, "csv", token, "new_roles") : "#"} />}>
+            New entities & roles (CSV)
+          </DropdownMenuItem>
+          <DropdownMenuItem render={<a href={token ? api.exportUrl(projectId, "csv", token, "products") : "#"} />}>
+            Products & services (CSV)
+          </DropdownMenuItem>
+          <DropdownMenuItem render={<a href={token ? api.exportUrl(projectId, "json", token, "products") : "#"} />}>
+            Products & services (JSON)
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
