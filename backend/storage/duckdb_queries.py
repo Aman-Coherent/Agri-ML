@@ -92,7 +92,9 @@ def _export_query(project_id: str, kind: ExportKind, job_id: str | None) -> tupl
             f"""WITH {cte},
             listed AS (SELECT * FROM rows WHERE NOT is_new_role)
             SELECT native_id AS "Lead ID", company_name AS "Company Name", location AS "Location",
-                   url AS "Website", "group" AS "Group", entity AS "Entity",
+                   url AS "Website",
+                   any_value(CASE WHEN is_agriculture THEN description ELSE '' END) AS "Description",
+                   "group" AS "Group", entity AS "Entity",
                    string_agg(role, ', ' ORDER BY role_id) AS "Roles",
                    array_to_string(list_filter(list_distinct(flatten(list(string_split(business_types, ', ')
                        ORDER BY role_id))), x -> x <> ''), ', ') AS "Business Types",
@@ -107,7 +109,9 @@ def _export_query(project_id: str, kind: ExportKind, job_id: str | None) -> tupl
     return (
         f"""WITH {cte}
         SELECT native_id AS "Lead ID", company_name AS "Company Name", location AS "Location",
-               url AS "Website", "group" AS "Group", entity AS "Entity",
+               url AS "Website",
+               CASE WHEN is_agriculture THEN description ELSE '' END AS "Description",
+               "group" AS "Group", entity AS "Entity",
                CASE WHEN is_new_entity THEN 'New entity' ELSE 'Listed entity' END AS "Entity Status",
                role AS "New Role", business_types AS "Business Types", note AS "Reason",
                CASE WHEN is_agriculture THEN 'Yes' ELSE 'No' END AS "Agriculture",
